@@ -64,7 +64,6 @@ def cross_validate(
     groups: pd.Series,
     cv: GroupKFold | None = None,
     n_folds: int = CV_N_FOLDS,
-    extra_train_features: pd.DataFrame | None = None,  # ← AJOUT
     verbose: bool = True,
 ) -> dict[str, Any]:
     """
@@ -121,21 +120,6 @@ def cross_validate(
 
         X_fold_train = X.iloc[train_idx]
         X_fold_val   = X.iloc[val_idx]
-
-        # Inject stage-1 predictions if provided (sequential pipeline)
-        if extra_train_features is not None:
-            assert len(extra_train_features) == len(X), "extra_train_features is not aligned with X (lengths mismatch)."
-            X_fold_train = pd.concat(
-                [X_fold_train.reset_index(drop=True),
-                extra_train_features.iloc[train_idx].reset_index(drop=True)],
-                axis=1,
-            )
-            X_fold_val = pd.concat(
-                [X_fold_val.reset_index(drop=True),
-                extra_train_features.iloc[val_idx].reset_index(drop=True)],
-                axis=1,
-            )
-
         y_fold_train = y.iloc[train_idx]
         y_fold_val   = y.iloc[val_idx]
 

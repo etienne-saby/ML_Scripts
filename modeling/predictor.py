@@ -58,8 +58,6 @@ from config import (
     CampaignPaths,
     RANDOM_STATE,
     CARBON_HORIZONS,
-    NO_INJECT_HORIZON,
-    MIN_ENRICH_HORIZON
 )
 from column_taxonomy import (
     ACTIVE_FEATURES_B2,
@@ -69,6 +67,9 @@ from column_taxonomy import (
     CLIMATE_MEAN_VARS, 
     CLIMATE_SUM_VARS,
     NOMINAL_POPULATION,
+    STEP2_AF_FEATURES,
+    STEP2_TA_FEATURES,
+    STEP2_TARGETS,
 )
 from modeling.classifiers import (
     CLF1_FEATURES, CLF2_FEATURES,
@@ -86,9 +87,8 @@ N_YEARS: int = 40
 
 # Horizon targets — ALL in horizon mode now
 STAGE1_TARGETS  = ["carbonStem_AF", "carbonStem_TF"]
-STAGE2A_TARGETS = ["yield_AF"]    # receives carbonStem_AF injection
-STAGE2B_TARGETS = ["yield_TA"]    # pure crop — NO tree injection
-ALL_HORIZON_TARGETS = STAGE1_TARGETS + STAGE2A_TARGETS + STAGE2B_TARGETS
+STAGE2_TARGETS  = STEP2_TARGETS
+ALL_HORIZON_TARGETS = STAGE1_TARGETS
 
 
 # ============================================================================
@@ -125,6 +125,22 @@ def load_all_models(
                 log.debug("Loaded: %s", key)
             else:
                 log.warning("Model not found: '%s' → %s", key, path)
+    
+    # ── Stage 2 : row-by-row (v5.0) ─────────────────────────────────────
+    for target in STAGE2_TARGETS:
+        key  = target
+        path = campaign.metamodels_dir / f"lgbm_{target}_rowwise.joblib"
+        if path.exists():
+            models[key] = load_model(path)
+            log.debug("Loaded Stage 2 rowwise: %s", key)
+        else:
+            log.warning("Stage 2 model not found: '%s' → %s", key, path)
+
+    log.info(
+        "Loaded %d Stage 1 + %d Stage 2 models.",
+        len([k for k in models if "_h" in k]),
+        len([k for k in models if "_h" not in k and k in STAGE2_TARGETS]),
+    )
 
     log.info(
         "Loaded %d / %d expected horizon models.",
@@ -327,6 +343,117 @@ def build_inference_grid(
 
 
 # ============================================================================
+# INFERENCE ROW BUILDER — Step 2 row-by-row (v5.0)
+# ============================================================================
+
+def build_inference_rows(
+    params: dict[str, Any],
+    cs_af_trajectory: np.ndarray,
+    n_years: int = N_YEARS,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Génère les DataFrames d'inférence row-by-row pour yield_AF et yield_TA.
+
+    Chaque ligne = 1 année (t = 1 → n_years).
+    Remplace la logique d'agrégation horizon + PCHIP pour Step 2 (v5.0).
+
+    Parameters
+    ----------
+    params : dict
+        Paramètres utilisateur. Doit contenir :
+          - toutes les features statiques (DESIGN, SOIL, GEO, CATEGORICAL)
+          - les CLIMATE_FEATURES comme scalaire (broadcast) ou array (n_years,)
+    cs_af_trajectory : np.ndarray, shape (n_years,)
+        Trajectoire carbonStem_AF prédite par Step 1 (expm1 back-transformée).
+        Injectée comme feature dans df_af uniquement.
+    n_years : int, default 40
+
+    Returns
+    -------
+    df_af : pd.DataFrame, shape (n_years, len(STEP2_AF_FEATURES))
+        Feature matrix pour yield_AF — inclut carbonStem_AF[t].
+    df_ta : pd.DataFrame, shape (n_years, len(STEP2_TA_FEATURES))
+        Feature matrix pour yield_TA — sans carbonStem.
+
+    Notes
+    -----
+    - Les CLIMATE_FEATURES scalaires sont broadcastés sur n_years années.
+      Cela suppose un climat stationnaire (scénario moyen représentatif).
+      Pour un scénario annualisé, passer des arrays de longueur n_years.
+    - Harvest_Year_Absolute = 1 → n_years (entiers).
+    - Les colonnes catégorielles sont castées en dtype='category' (LightGBM natif).
+    """
+    years = np.arange(1, n_years + 1)
+
+    # ── 1. Résolution des variables climatiques ──────────────────────────
+    climate_arrays: dict[str, np.ndarray] = {}
+    for var in CLIMATE_FEATURES:
+        val = params.get(var)
+        if val is None:
+            log.warning("Climate feature '%s' absent de params → broadcast 0.0", var)
+            climate_arrays[var] = np.zeros(n_years)
+        elif np.isscalar(val):
+            climate_arrays[var] = np.full(n_years, float(val))
+        else:
+            arr = np.asarray(val, dtype=float)
+            if len(arr) != n_years:
+                raise ValueError(
+                    f"Climate array '{var}' a une longueur {len(arr)}, "
+                    f"attendu {n_years}."
+                )
+            climate_arrays[var] = arr
+
+    # ── 2. Features statiques (design, soil, geo, categorical) ──────────
+    static_feats = [
+        f for f in STEP2_TA_FEATURES
+        if f not in CLIMATE_FEATURES
+        and f != "Harvest_Year_Absolute"
+    ]
+    missing_static = [f for f in static_feats if f not in params]
+    if missing_static:
+        raise ValueError(
+            f"Features statiques manquantes dans params : {missing_static}"
+        )
+
+    # ── 3. Construction des DataFrames row-by-row ────────────────────────
+    rows_af: list[dict[str, Any]] = []
+    rows_ta: list[dict[str, Any]] = []
+
+    for i, t in enumerate(years):
+        row_base: dict[str, Any] = {
+            "Harvest_Year_Absolute": int(t),
+        }
+        # Features statiques
+        for feat in static_feats:
+            row_base[feat] = params[feat]
+        # Climat annuel à l'année t
+        for var in CLIMATE_FEATURES:
+            row_base[var] = float(climate_arrays[var][i])
+
+        # yield_AF : + carbonStem_AF[t]
+        row_af = {**row_base, "carbonStem_AF": float(cs_af_trajectory[i])}
+        rows_af.append(row_af)
+
+        # yield_TA : pas de carbonStem
+        rows_ta.append(row_base.copy())
+
+    df_af = pd.DataFrame(rows_af)[STEP2_AF_FEATURES]
+    df_ta = pd.DataFrame(rows_ta)[STEP2_TA_FEATURES]
+
+    # ── 4. Encodage catégoriel ───────────────────────────────────────────
+    for col in CATEGORICAL_FEATURES_B2:
+        if col in df_af.columns:
+            df_af[col] = df_af[col].astype("category")
+        if col in df_ta.columns:
+            df_ta[col] = df_ta[col].astype("category")
+
+    log.debug(
+        "build_inference_rows: df_af %s, df_ta %s",
+        df_af.shape, df_ta.shape,
+    )
+    return df_af, df_ta
+
+# ============================================================================
 # CORE HORIZON PREDICTOR (internal)
 # ============================================================================
 
@@ -380,24 +507,6 @@ def _predict_horizon_target(
 
         # Build feature row for this horizon
         df_h = grid[h].copy()
-
-        # yield_AF only: inject carbonStem_AF_h{h} (Stage 1 output)
-        if target in STAGE2A_TARGETS:
-            if h > NO_INJECT_HORIZON:
-                cs_col = f"carbonStem_AF_h{h}"
-                cs_val = (cs_af_by_h or {}).get(h, 0.0)
-                df_h[cs_col] = cs_val
-                log.debug(
-                    "yield_AF h=%d: injected %s=%.3f", h, cs_col, cs_val
-                )
-            else:
-                log.debug(
-                    "yield_AF h=%d: carbonStem injection skipped "
-                    "(h <= NO_INJECT_HORIZON=%d)",
-                    h, NO_INJECT_HORIZON,
-                )
-
-        # yield_TA: no extra column needed (pure crop, no tree features)
 
         # Align to model's feature names
         try:
@@ -623,30 +732,40 @@ def predict_cascade(
         )
         # cs_af_by_h stays empty → yield_AF will receive 0 for carbonStem
         
-    # ── 5. Stage 2a — yield_AF (+ carbonStem_AF injection) ───────────────
-    if yield_failed == 0:
-        preds["yield_AF"] = _predict_horizon_target(
-            target="yield_AF",
-            grid=grid,
-            models=models,
-            horizons=horizons,
-            cs_af_by_h=cs_af_by_h,     # ← carbonStem_AF_h{h} injected
-            log_transform=False,        # yield_AF NOT log-transformed
-        )
-
-    # ── 6. Stage 2b — yield_TA (pure crop, NO tree features) ─────────────
-    if yield_failed == 0:
-        preds["yield_TA"] = _predict_horizon_target(
-            target="yield_TA",
-            grid=grid,
-            models=models,
-            horizons=horizons,
-            cs_af_by_h=None,           # ← NO injection for yield_TA
-            log_transform=False,        # yield_TA NOT log-transformed
-        )
+    # ── 5. Stage 2 — yield_AF & yield_TA (row-by-row, v5.0) ────────────
+    if yield_failed:
+        preds["yield_AF"] = np.zeros(N_YEARS)
+        preds["yield_TA"] = np.zeros(N_YEARS)
+        log.info("yield_failed=True → yield_AF = yield_TA = 0.")
 
     else:
-        log.info("yield_failed=1 — yield_AF and yield_TA = 0.")
+        cs_af_trajectory = preds.get("carbonStem_AF", np.zeros(N_YEARS))
+
+        df_af, df_ta = build_inference_rows(
+            params=params,
+            cs_af_trajectory=cs_af_trajectory,
+            n_years=N_YEARS,
+        )
+
+        # yield_AF
+        model_yield_af = models.get("yield_AF")
+        if model_yield_af is not None:
+            preds["yield_AF"] = np.clip(
+                model_yield_af.predict(df_af), 0.0, None
+            )
+        else:
+            log.warning("Modèle 'yield_AF' absent → zeros.")
+            preds["yield_AF"] = np.zeros(N_YEARS)
+
+        # yield_TA
+        model_yield_ta = models.get("yield_TA")
+        if model_yield_ta is not None:
+            preds["yield_TA"] = np.clip(
+                model_yield_ta.predict(df_ta), 0.0, None
+            )
+        else:
+            log.warning("Modèle 'yield_TA' absent → zeros.")
+            preds["yield_TA"] = np.zeros(N_YEARS)
 
     out: dict[str, Any] = {
         "predictions":    preds,
@@ -776,83 +895,83 @@ def format_output(
     return df[cols]
 
 
-# ============================================================================
-# STAGE 1 PREDS — ROW-LEVEL RECONSTRUCTION (training helper)
-# ============================================================================
+# # ============================================================================
+# # STAGE 1 PREDS — ROW-LEVEL RECONSTRUCTION (training helper)
+# # ============================================================================
 
-def build_stage1_preds_rowlevel(
-    df_split: pd.DataFrame,
-    horizon_models: dict,
-    horizon_datasets: dict,
-    horizons: list[int] | None = None,
-    log_transform: bool = True,
-) -> pd.DataFrame:
-    """
-    Reconstruct Stage 1 predictions at SimID level for training injection.
+# def build_stage1_preds_rowlevel(
+#     df_split: pd.DataFrame,
+#     horizon_models: dict,
+#     horizon_datasets: dict,
+#     horizons: list[int] | None = None,
+#     log_transform: bool = True,
+# ) -> pd.DataFrame:
+#     """
+#     Reconstruct Stage 1 predictions at SimID level for training injection.
 
-    Used in full_training.py to feed carbonStem_AF_h{h} into
-    yield_AF_h{h} training (Stage 2a). NOT used for yield_TA.
+#     Used in full_training.py to feed carbonStem_AF_h{h} into
+#     yield_AF_h{h} training (Stage 2a). NOT used for yield_TA.
 
-    Parameters
-    ----------
-    df_split : pd.DataFrame  — must contain 'SimID' column
-    horizon_models : dict    — {(target, h): fitted_model}
-    horizon_datasets : dict  — {(target, h): (X_h, y_h)}
-    horizons : list of int
-    log_transform : bool, default True  — must match Stage 1 training
+#     Parameters
+#     ----------
+#     df_split : pd.DataFrame  — must contain 'SimID' column
+#     horizon_models : dict    — {(target, h): fitted_model}
+#     horizon_datasets : dict  — {(target, h): (X_h, y_h)}
+#     horizons : list of int
+#     log_transform : bool, default True  — must match Stage 1 training
 
-    Returns
-    -------
-    pd.DataFrame
-        Columns: ["carbonStem_AF_h{h}" for h in horizons]
-                 + ["carbonStem_TF_h{h}" for h in horizons]
-        Index aligned to df_split.index.
-    """
-    if horizons is None:
-        horizons = CARBON_HORIZONS
+#     Returns
+#     -------
+#     pd.DataFrame
+#         Columns: ["carbonStem_AF_h{h}" for h in horizons]
+#                  + ["carbonStem_TF_h{h}" for h in horizons]
+#         Index aligned to df_split.index.
+#     """
+#     if horizons is None:
+#         horizons = CARBON_HORIZONS
 
-    stage1_cols = (
-        [f"carbonStem_AF_h{h}" for h in horizons] +
-        [f"carbonStem_TF_h{h}" for h in horizons]
-    )
-    preds_by_simid: dict[str, dict[str, float]] = {}
+#     stage1_cols = (
+#         [f"carbonStem_AF_h{h}" for h in horizons] +
+#         [f"carbonStem_TF_h{h}" for h in horizons]
+#     )
+#     preds_by_simid: dict[str, dict[str, float]] = {}
 
-    for (target, h), model_h in horizon_models.items():
-        col_name = f"{target}_h{h}"
-        key      = (target, h)
-        if key not in horizon_datasets:
-            log.warning("horizon_datasets missing key %s — skipping.", key)
-            continue
+#     for (target, h), model_h in horizon_models.items():
+#         col_name = f"{target}_h{h}"
+#         key      = (target, h)
+#         if key not in horizon_datasets:
+#             log.warning("horizon_datasets missing key %s — skipping.", key)
+#             continue
 
-        X_h_full, _ = horizon_datasets[key]
-        assert len(X_h_full) > 0, f"Empty X for {key}"
+#         X_h_full, _ = horizon_datasets[key]
+#         assert len(X_h_full) > 0, f"Empty X for {key}"
 
-        preds_raw = model_h.predict(X_h_full)
-        preds_val = (
-            np.clip(np.expm1(preds_raw), 0.0, None)
-            if log_transform
-            else np.clip(preds_raw, 0.0, None)
-        )
+#         preds_raw = model_h.predict(X_h_full)
+#         preds_val = (
+#             np.clip(np.expm1(preds_raw), 0.0, None)
+#             if log_transform
+#             else np.clip(preds_raw, 0.0, None)
+#         )
 
-        for sim, pred in zip(X_h_full.index, preds_val):
-            sim_str = str(sim)
-            if sim_str not in preds_by_simid:
-                preds_by_simid[sim_str] = {}
-            preds_by_simid[sim_str][col_name] = float(pred)
+#         for sim, pred in zip(X_h_full.index, preds_val):
+#             sim_str = str(sim)
+#             if sim_str not in preds_by_simid:
+#                 preds_by_simid[sim_str] = {}
+#             preds_by_simid[sim_str][col_name] = float(pred)
 
-    rows = [
-        {col: preds_by_simid.get(str(sim), {}).get(col, 0.0)
-         for col in stage1_cols}
-        for sim in df_split["SimID"].values
-    ]
+#     rows = [
+#         {col: preds_by_simid.get(str(sim), {}).get(col, 0.0)
+#          for col in stage1_cols}
+#         for sim in df_split["SimID"].values
+#     ]
 
-    df_out = pd.DataFrame(rows, index=df_split.index, columns=stage1_cols)
+#     df_out = pd.DataFrame(rows, index=df_split.index, columns=stage1_cols)
 
-    # Validation
-    n_zero_rows = (df_out == 0.0).all(axis=1).sum()
-    if n_zero_rows > 0:
-        log.warning(
-            "build_stage1_preds_rowlevel: %d rows fully zero "
-            "(SimID absent from horizon_datasets).", n_zero_rows
-        )
-    return df_out
+#     # Validation
+#     n_zero_rows = (df_out == 0.0).all(axis=1).sum()
+#     if n_zero_rows > 0:
+#         log.warning(
+#             "build_stage1_preds_rowlevel: %d rows fully zero "
+#             "(SimID absent from horizon_datasets).", n_zero_rows
+#         )
+#     return df_out

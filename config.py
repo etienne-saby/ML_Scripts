@@ -516,9 +516,8 @@ LOG_TARGETS: list[str] = [
 ]
 
 CARBON_HORIZONS: list[int] = [5, 10, 20, 30, 40]
-MIN_CARBON_HORIZON: float = 50.0      # kgC/tree — training threshold
-NO_INJECT_HORIZON: int = 10
 MIN_ENRICH_HORIZON: int = 10
+MIN_CARBON_HORIZON: float = 50.0      # kgC/tree — training threshold
 
 SEQUENTIAL_TARGETS_STAGE1: list[str] = [
     f"carbonStem_AF_h{h}" for h in CARBON_HORIZONS
@@ -527,6 +526,25 @@ SEQUENTIAL_TARGETS_STAGE1: list[str] = [
 ]
 
 SEQUENTIAL_TARGETS_STAGE2: list[str] = ["yield_AF", "yield_TA"]
+
+PARAMS_YIELD_AF_ROW: dict = {
+    "n_estimators":      500,
+    "learning_rate":     0.05,
+    "num_leaves":        63,
+    "min_child_samples": 15,
+    "subsample":         0.8,
+    "colsample_bytree":  0.8,
+    "reg_alpha":         0.3,
+    "reg_lambda":        0.5,
+    "random_state":      RANDOM_STATE,
+    "n_jobs":            -1,
+    "verbose":           -1,
+    "importance_type":   "gain",
+}
+
+PARAMS_YIELD_TA_ROW: dict = {
+    **PARAMS_YIELD_AF_ROW
+}
 
 # ============================================================================
 # CLASSIFIER THRESHOLDS

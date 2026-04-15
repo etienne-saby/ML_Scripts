@@ -217,6 +217,29 @@ ACTIVE_FEATURES_B2 = (
     CATEGORICAL_FEATURES_B2
 )
 
+# Step 2 — Feature sets row-by-row
+
+STEP2_AF_FEATURES = (
+    TEMPORAL_FEATURES        + 
+    GEO_FEATURES             +
+    CLIMATE_FEATURES         +
+    DESIGN_FEATURES_B2       +
+    SOIL_FEATURES_B2         +
+    CATEGORICAL_FEATURES_B2  +
+    ["carbonStem_AF"]
+)
+
+STEP2_TA_FEATURES = (
+    TEMPORAL_FEATURES        +
+    GEO_FEATURES             +
+    CLIMATE_FEATURES         +
+    DESIGN_FEATURES_B2       +
+    SOIL_FEATURES_B2         +
+    CATEGORICAL_FEATURES_B2
+)
+
+STEP2_TARGETS = ["yield_AF", "yield_TA"]
+
 
 # ==============================================================================
 # TARGETS — ML LEVEL 1 : PHYSICAL STOCKS (directly predicted by the model)
