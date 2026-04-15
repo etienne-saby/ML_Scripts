@@ -38,7 +38,7 @@ from column_taxonomy import (
 from config import get_campaign_paths, cleanup_empty_campaign_dirs
 from data.loader import encode_categoricals, load_data
 from data.preparation import add_derived_columns, filter_crops
-from hsic_sensitivity import (
+from analysis.hsic_sensitivity import (
     compute_hsic_by_year,
     compute_hsic_indices,
     plot_hsic_heatmap,

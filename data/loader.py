@@ -29,7 +29,7 @@ to maintain architectural consistency. Two strategies are supported:
 Module-level aliases
 --------------------
 ALL_FEATURES        = ALL_FEATURES_B1   (override for B2 in calling code)
-CATEGORICAL_FEATURES = CATEGORICAL_FEATURES_B1
+CATEGORICAL_FEATURES = ALL_CAT_FEATS
 
 Author  : Étienne SABY
 Updated : 2026-04
@@ -46,10 +46,7 @@ import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 
 from _version import __version__
-from column_taxonomy import ALL_FEATURES_B1, ALL_TARGETS, CATEGORICAL_FEATURES_B1
-
-ALL_FEATURES         = ALL_FEATURES_B1
-CATEGORICAL_FEATURES = CATEGORICAL_FEATURES_B1
+from column_taxonomy import ALL_FEATURES, ALL_TARGETS, CATEGORICAL_FEATURES
 
 log = logging.getLogger(__name__)
 

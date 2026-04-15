@@ -37,6 +37,7 @@ from config import (
     RANDOM_STATE,
     FIGURE_DPI,
     FIGURE_FORMAT,
+    CARBON_HORIZONS
 )
 from column_taxonomy import STOCK_TARGETS_MINIMAL
 from utils.io_utils import save_shap_values
@@ -109,17 +110,39 @@ def compute_shap_values(
         X_sample[col] = X_sample[col].astype("category")
 
     explainer = shap.TreeExplainer(model)
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        raw = explainer.shap_values(X_sample, check_additivity=check_additivity)
+    raw = explainer.shap_values(X_sample, check_additivity=check_additivity)
 
     # LGBMClassifier returns a list [shap_class0, shap_class1] — keep class 1
     if isinstance(raw, list):
-        shap_vals = raw[1]
+        # Binaire : [class0, class1] → garder class1
+        if len(raw) == 2:
+            shap_vals = raw[1]
+        else:
+            # Multiclasse : mean(|SHAP|) sur toutes les classes
+            # raw[k] shape : (n_samples, n_features) — stack sur axis=0
+            shap_vals = np.mean(
+                np.abs(np.stack(raw, axis=0)),   # (n_classes, n_samples, n_features)
+                axis=0,                           # → (n_samples, n_features)
+            )
+    elif isinstance(raw, np.ndarray) and raw.ndim == 3:
+        # SHAP retourne parfois (n_samples, n_features, n_classes)
+        # On normalise vers (n_samples, n_features)
+        if raw.shape[2] <= raw.shape[1]:
+            # Dernier axe = classes : mean sur axis=2
+            shap_vals = np.abs(raw).mean(axis=2)
+        else:
+            # Premier axe = classes (n_classes, n_samples, n_features)
+            shap_vals = np.abs(raw).mean(axis=0)
     else:
-        shap_vals = raw
+        shap_vals = raw   # Régresseur → 2D directement
 
+    # Validation finale — garantir 2D (n_samples, n_features)
+    if shap_vals.ndim != 2:
+        raise ValueError(
+            f"compute_shap_values: unexpected shap_vals shape {shap_vals.shape} "
+            f"after normalization. Expected 2D (n_samples, n_features)."
+        )
+    
     log.info(
         "SHAP computed: %d samples × %d features",
         shap_vals.shape[0], shap_vals.shape[1],
@@ -149,13 +172,24 @@ def summarise_shap(
     pd.DataFrame
         Columns: [feature, mean_abs_shap], sorted descending.
     """
+    if isinstance(shap_values, list):
+        shap_values = np.mean(
+            np.abs(np.stack(shap_values, axis=0)), axis=0
+        )
     mean_abs = np.abs(shap_values).mean(axis=0)
+    
+    # Validation longueur
+    if len(mean_abs) != len(feature_names):
+        raise ValueError(
+            f"summarise_shap: mean_abs length ({len(mean_abs)}) "
+            f"!= feature_names length ({len(feature_names)}). "
+            f"shap_values shape: {np.array(shap_values).shape}"
+        )
     return (
         pd.DataFrame({"feature": feature_names, "mean_abs_shap": mean_abs})
         .sort_values("mean_abs_shap", ascending=False)
         .reset_index(drop=True)
     )
-
 
 def build_long_format(
     shap_values: np.ndarray,
@@ -188,11 +222,16 @@ def build_long_format(
     for j, feat in enumerate(feature_names):
         feat_vals = X_sample.iloc[:, j].values
         shap_vals = shap_values[:, j]
+        try:
+            feat_vals_float = feat_vals.astype(float)
+        except (ValueError, TypeError):
+            feat_vals_float = np.full(len(feat_vals), np.nan)
+        
         records.append(pd.DataFrame({
             "target":        target,
             "feature":       feat,
             "shap_value":    shap_vals,
-            "feature_value": feat_vals.astype(float, errors="ignore"),
+            "feature_value": feat_vals_float,
         }))
 
     return pd.concat(records, ignore_index=True)
@@ -234,6 +273,8 @@ def plot_shap_beeswarm(
         show=False,
         plot_type="dot",
     )
+    fig = plt.gcf()
+    ax  = plt.gca()
     ax.set_title(f"SHAP — {target}", fontsize=12, pad=10)
     plt.tight_layout()
 
@@ -326,6 +367,7 @@ def run_shap_analysis(
     targets: list[str] | None = None,
     max_samples: int = MAX_SHAP_SAMPLES,
     random_state: int = RANDOM_STATE,
+    horizons: list[int] = CARBON_HORIZONS,
 ) -> dict[str, dict]:
     """
     Run full SHAP analysis for a set of regression models.
@@ -358,6 +400,7 @@ def run_shap_analysis(
     results: dict[str, dict] = {}
 
     for target in targets:
+        
         if target not in models:
             log.warning("SHAP: model for '%s' not found — skipped.", target)
             continue

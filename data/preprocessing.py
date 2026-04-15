@@ -245,7 +245,7 @@ def apply_winsorization(
             )
 
     log.info("   ✓ Winsorisation complete — %d columns processed", len(stock_cols))
-    return df, fitted_bounds if fit else bounds
+    return df, (fitted_bounds if fit else bounds)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

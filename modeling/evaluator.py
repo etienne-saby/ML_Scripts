@@ -212,7 +212,6 @@ def plot_pred_vs_obs(
     ax.set_ylabel("Predictions", fontsize=12, fontweight="bold")
     ax.set_title(title, fontsize=14, fontweight="bold", pad=15)
     ax.legend(loc="lower right", fontsize=10)
-    ax.set_aspect("equal", adjustable="box")
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     return save_figure(fig, save_path, show=show)
@@ -381,6 +380,7 @@ def plot_shap_summary(
         show=False,
         plot_size=None,
     )
+    fig = plt.gcf()
     ax = plt.gca()
     ax.set_title(title, fontsize=14, fontweight="bold", pad=15)
     plt.tight_layout()

@@ -92,8 +92,8 @@ def build_lgb_classifier(
     Parameters
     ----------
     params : dict, optional
-        Overrides for LGB_PARAMS. Note: objective is forced to
-        'binary' and metric to 'binary_logloss'.
+        Overrides for LGB_PARAMS. Note: objective defaults to LGB_PARAMS 
+        default but can be overridden via params (e.g. 'multiclass' for CLF1).
     categorical_feature : list of str, optional
     **kwargs
 
@@ -183,9 +183,11 @@ def get_feature_importances(
     ValueError
         If the model is not fitted.
     """
-    if isinstance(model, lgb.LGBMRegressor):
+    if isinstance(model, (lgb.LGBMRegressor, lgb.LGBMClassifier)):
         if not hasattr(model, "feature_importances_"):
-            raise ValueError("LGBMRegressor is not fitted. Call model.fit() first.")
+            raise ValueError(
+                f"{type(model).__name__} is not fitted. Call model.fit() first."
+            )
         importances = model.feature_importances_
 
     elif isinstance(model, xgb.XGBRegressor):
@@ -196,7 +198,7 @@ def get_feature_importances(
     else:
         raise TypeError(
             f"Unsupported model type: {type(model).__name__}. "
-            "Expected LGBMRegressor or XGBRegressor."
+            "Expected LGBMRegressor, LGBMClassifier, or XGBRegressor."
         )
 
     return (

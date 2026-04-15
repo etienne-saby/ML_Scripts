@@ -23,13 +23,15 @@ Notes
 - save_cv_results() expects a dict with a "fold_scores" key, as returned
   by modeling.trainer.cross_validate().
 - save_shap_values() requires Python >= 3.9 (uses Path.with_stem()).
-- print_campaign_summary() uses print() intentionally (interactive helper).
+- print_campaign_summary() uses log.info() intentionally (interactive helper).
   All other functions route through the module-level logger.
 
 Author  : Étienne SABY
 Updated : 2026-04
 """
 from __future__ import annotations
+
+import warnings
 
 import json
 import logging
@@ -84,7 +86,7 @@ def save_model(
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     joblib.dump(model, save_path, compress=compress)
-    print(f"💾 Model saved: {save_path}")
+    log.info(f"💾 Model saved: {save_path}")
 
     if metadata is not None:
         meta_path = save_path.with_suffix(".json")
@@ -95,7 +97,7 @@ def save_model(
         }
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, default=str)
-        print(f"💾 Metadata saved: {meta_path}")
+        log.info(f"💾 Metadata saved: {meta_path}")
 
     return save_path
 
@@ -127,13 +129,13 @@ def load_model(model_path: Path) -> Any:
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
     model = joblib.load(model_path)
-    print(f"✅ Model loaded: {model_path}")
+    log.info(f"✅ Model loaded: {model_path}")
 
     meta_path = model_path.with_suffix(".json")
     if meta_path.exists():
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
-        print(
+        log.info(
             f"   └─ {meta.get('model_type', 'N/A')} | "
             f"saved {meta.get('saved_at', 'N/A')}"
         )
@@ -202,7 +204,7 @@ def save_metrics(
         df_new = pd.concat([df_existing, df_new], ignore_index=True)
 
     df_new.to_csv(save_path, index=False)
-    print(f"💾 Metrics saved: {save_path}")
+    log.info(f"💾 Metrics saved: {save_path}")
     return save_path
 
 
@@ -210,7 +212,7 @@ def save_predictions(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     save_path: Path,
-    index: "pd.Index | None" = None,
+    index: pd.Index | None = None,
     extra_columns: dict[str, np.ndarray] | None = None,
 ) -> Path:
     """
@@ -248,7 +250,7 @@ def save_predictions(
         df.index = index
 
     df.to_csv(save_path, index=(index is not None))
-    print(f"💾 Predictions saved: {save_path} ({len(df):,} rows)")
+    log.info(f"💾 Predictions saved: {save_path} ({len(df):,} rows)")
     return save_path
 
 
@@ -275,13 +277,12 @@ def save_cv_results(
 
     fold_scores = cv_results.get("fold_scores", [])
     if not fold_scores:
-        import warnings
         warnings.warn("save_cv_results: 'fold_scores' is empty — nothing saved.")
         return save_path
 
     df = pd.DataFrame(fold_scores)
     df.to_csv(save_path, index=False)
-    print(f"💾 CV results saved: {save_path}")
+    log.info(f"💾 CV results saved: {save_path}")
     return save_path
 
 
@@ -314,7 +315,7 @@ def save_sobol_indices(
     for key, df in sobol_indices.items():
         out = save_path.parent / f"{save_path.stem}_{key}.csv"
         df.to_csv(out, index=True)
-        print(f"💾 Sobol {key} saved: {out}")
+        log.info(f"💾 Sobol {key} saved: {out}")
 
     return save_path.parent / f"{save_path.stem}_ST.csv"
 
@@ -348,7 +349,7 @@ def save_feature_importances(
         df = importances.copy()
 
     df.to_csv(save_path, index=False)
-    print(f"💾 Feature importances saved: {save_path}")
+    log.info(f"💾 Feature importances saved: {save_path}")
     return save_path
 
 
@@ -452,7 +453,7 @@ def print_campaign_summary(campaign: CampaignPaths) -> None:
     Print a summary of all models saved in the campaign directory.
 
     For each .joblib file found, reads the companion .json metadata file
-    (if present) and prints target name and r2_test. Uses print() directly
+    (if present) and prints target name and r2_test. Uses log.info() directly
     (intended as an interactive helper, not a logging call).
 
     Parameters
@@ -460,19 +461,19 @@ def print_campaign_summary(campaign: CampaignPaths) -> None:
     campaign : CampaignPaths
     """
     models = list_models(campaign)
-    print(f"\n📦 Campaign: {campaign.campaign_name}")
-    print(f"   Models dir : {campaign.metamodels_dir}")
-    print(f"   Models found: {len(models)}")
+    log.info(f"\n📦 Campaign: {campaign.campaign_name}")
+    log.info(f"   Models dir : {campaign.metamodels_dir}")
+    log.info(f"   Models found: {len(models)}")
     for p in models:
         meta_path = p.with_suffix(".json")
         if meta_path.exists():
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
             r2 = meta.get("r2_test", "N/A")
-            target = meta.get("target", p.stem)
-            print(f"   └─ {target:30s} R²_test={r2}")
+            label = meta.get("model_key", meta.get("target", p.stem))
+            log.info(f"   └─ {label:30s} R²_test={r2}")
         else:
-            print(f"   └─ {p.stem}")
+            log.info(f"   └─ {p.stem}")
 
 
 def setup_file_logging(

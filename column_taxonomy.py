@@ -65,18 +65,41 @@ CLIMATE_FEATURES = [
     "minTemperature_extreme_AF",   # Min extreme temperature
 ]
 
+CLIMATE_AGG_STATS = ["cum", "mean", "std"]
+
+CLIMATE_SUM_VARS  = ["GDD_cycle_AF", "ETP_cycle_AF",
+                      "precipitation_AF", "globalRadiation_AF"]
+
+CLIMATE_MEAN_VARS = ["frost_events_cycle_AF",
+                      "maxTemperature_extreme_AF",
+                      "minTemperature_extreme_AF"]
+
+CLIMATE_RECENT_WINDOW: int = 5
+
+CLIMATE_HORIZON_FEATURES = (
+    [f"{v}_cum"         for v in CLIMATE_SUM_VARS] +
+    [f"{v}_std"         for v in CLIMATE_SUM_VARS + CLIMATE_MEAN_VARS] +
+    [f"{v}_mean"        for v in CLIMATE_MEAN_VARS] +
+    # Nouveaux
+    [f"{v}_p10"         for v in CLIMATE_SUM_VARS + CLIMATE_MEAN_VARS] +
+    [f"{v}_p90"         for v in CLIMATE_SUM_VARS + CLIMATE_MEAN_VARS] +
+    [f"{v}_trend"       for v in CLIMATE_SUM_VARS + CLIMATE_MEAN_VARS] +
+    [f"{v}_recent_mean" for v in CLIMATE_SUM_VARS + CLIMATE_MEAN_VARS]
+)
 # ------------------------------------------------------------------------------
 # Group 3 : PLOT DESIGN (Sobol parameters — numeric)
 # Direct experimental plan parameters controlling agroforestry geometry.
 # Varied in B1 Sobol analysis; partially fixed in B2.
 # ------------------------------------------------------------------------------
-DESIGN_FEATURES_B1 = [
+DESIGN_FEATURES = [
     "plotWidth",        # Plot width (m) — inter-row distance
     "plotHeight",       # Plot height (m) — along-row distance
     "strip_width",      # Strip width (m) — tree alley width
     "northOrientation", # Plot orientation relative to North (degrees)
     "Rotation",         # Boolean : monoculture or rotation
 ]
+
+DESIGN_FEATURES_B1 = DESIGN_FEATURES
 
 DESIGN_FEATURES_B2 = [
     "plotWidth",
@@ -91,7 +114,7 @@ DESIGN_FEATURES_B2 = [
 # Pedological parameters from experimental plan.
 # sand+clay dominate LER sensitivity (ST ≈ 0.70 cumulated in B1).
 # ------------------------------------------------------------------------------
-SOIL_FEATURES_B1 = [
+SOIL_FEATURES = [
     "soilDepth",   # Total soil depth (m)
     "sand",        # Sand fraction (%)
     "clay",        # Clay fraction (%)
@@ -101,6 +124,8 @@ SOIL_FEATURES_B1 = [
     "w_amp",       # Water table amplitude (m)
     "w_mean",      # Water table mean depth (m, negative = below surface)
 ]
+
+SOIL_FEATURES_B1 = SOIL_FEATURES
 
 SOIL_FEATURES_B2 = [
     "soilDepth",
@@ -119,7 +144,7 @@ SOIL_FEATURES_B2 = [
 # ------------------------------------------------------------------------------
 GEO_FEATURES = [
     "latitude",    # Site latitude (degrees)
-    "longitude",   # Site longitude (degrees)
+    # "longitude",   # Site longitude (degrees) : not a direct feature but used for climate - data leak between lon & climate feats
 ]
 
 # ------------------------------------------------------------------------------
@@ -127,6 +152,12 @@ GEO_FEATURES = [
 # Encoded as dtype='category' for LightGBM (native support, no leakage).
 # LabelEncoder (sklearn) encoding is used only in cart.py for CART fitting.
 # ------------------------------------------------------------------------------
+CATEGORICAL_FEATURES = [
+    "main_crop",
+    "period",
+    "w_type",
+]
+
 CATEGORICAL_FEATURES_B1 = [
     "main_crop",   # Dominant crop species ('wheat' / 'maize')
     "period",      # Climate period reference ('PRE' / 'FUT')
@@ -149,21 +180,30 @@ CATEGORICAL_FEATURES_B2 = [
 #   - RR_*, LER_*, _delta_*                            → post-processing outputs
 #   - Stress variables (sticsWater*, sticsNitrogen*)   → simulator outputs, not inputs
 # ------------------------------------------------------------------------------
+ALL_FEATURES = (
+    TEMPORAL_FEATURES    +
+    GEO_FEATURES         +
+    CLIMATE_FEATURES     +
+    DESIGN_FEATURES      +
+    SOIL_FEATURES        +
+    CATEGORICAL_FEATURES
+)
+
 ALL_FEATURES_B1 = (
-    TEMPORAL_FEATURES +
-    CLIMATE_FEATURES  +
-    GEO_FEATURES      +
-    DESIGN_FEATURES_B1 +
-    SOIL_FEATURES_B1   +
+    TEMPORAL_FEATURES    +
+    GEO_FEATURES         +
+    CLIMATE_FEATURES     +
+    DESIGN_FEATURES_B1   +
+    SOIL_FEATURES_B1     +
     CATEGORICAL_FEATURES_B1
 )
 
 # Features used in B1 sensitivity analysis (true Sobol plan parameters only —
 # no temporal, no climate outputs)
 SOBOL_FEATURES = (
+    GEO_FEATURES       +
     DESIGN_FEATURES_B1 +
     SOIL_FEATURES_B1   +
-    GEO_FEATURES       +
     CATEGORICAL_FEATURES_B1
 )
 
@@ -171,6 +211,7 @@ SOBOL_FEATURES = (
 ACTIVE_FEATURES_B2 = (
     TEMPORAL_FEATURES    +
     GEO_FEATURES         +
+    CLIMATE_FEATURES     +
     DESIGN_FEATURES_B2   +
     SOIL_FEATURES_B2     +
     CATEGORICAL_FEATURES_B2
@@ -222,9 +263,18 @@ STOCK_TARGETS_MINIMAL = [
 # Labels assigned by filter_population() in preparation.py
 POPULATION_LABELS = [
     "yield_ok × tree_ok",       # Nominal population — main meta-model training set
+    "yield_ok × tree_stunted",
     "yield_ok × tree_failed",   # Cultural-only model
     "yield_fail × tree_ok",     # Geographic rejection rule
+    "yield_fail × tree_stunted",
     "yield_fail × tree_failed", # Full rejection (yield=0, carbon=0)
+]
+
+POPULATION_LABELS_BINARY = [
+    "yield_ok × tree_ok",       # Nominal population — main meta-model training set
+    "yield_ok × tree_degraded",
+    "yield_fail × tree_ok",
+    "yield_fail × tree_degraded",
 ]
 
 NOMINAL_POPULATION = "yield_ok × tree_ok"

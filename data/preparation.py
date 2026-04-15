@@ -37,8 +37,11 @@ import numpy as np
 import pandas as pd
 
 from _version import __version__
-from config import TREE_FAIL_THRESHOLD, YIELD_FAIL_THRESHOLD, YIELD_FAIL_RATE
-from column_taxonomy import NOMINAL_POPULATION, POPULATION_LABELS
+from config import TREE_FAIL_THRESHOLD, TREE_STUNT_THRESHOLD, YIELD_FAIL_THRESHOLD, YIELD_FAIL_RATE, MIN_ENRICH_HORIZON
+from column_taxonomy import (
+    NOMINAL_POPULATION, POPULATION_LABELS, POPULATION_LABELS_BINARY,
+    CLIMATE_SUM_VARS, CLIMATE_MEAN_VARS, CLIMATE_RECENT_WINDOW,
+)
 
 log = logging.getLogger(__name__)
 
@@ -257,6 +260,7 @@ def filter_population(
     df: pd.DataFrame,
     population: str | None = "yield_ok × tree_ok",
     tree_fail_threshold: float = TREE_FAIL_THRESHOLD,
+    tree_stunt_threshold: float = TREE_STUNT_THRESHOLD,
     yield_fail_threshold: float = YIELD_FAIL_THRESHOLD,
     yield_fail_rate: float = YIELD_FAIL_RATE,
     verbose: bool = True,
@@ -268,8 +272,10 @@ def filter_population(
     Populations
     -----------
     yield_ok × tree_ok       : main meta-model training set
+    yield_ok x tree_stunted
     yield_ok × tree_failed   : cultural-only model
     yield_fail × tree_ok     : geographic rejection rule
+    yield_fail × tree_stunted
     yield_fail × tree_failed : full rejection (yield=0, carbon=0)
 
     Classification rules
@@ -358,17 +364,40 @@ def filter_population(
     pop_df = pd.DataFrame({
         "tree_failed":  tree_failed,
         "yield_failed": yield_fail_per_sim,
+        "carbonStem_AF_last": last_cycle.set_index("SimID")["carbonStem_AF"],
     })
 
-    def _label(row: pd.Series) -> str:
-        y = "yield_ok"     if not row["yield_failed"] else "yield_fail"
-        t = "tree_ok"      if not row["tree_failed"]  else "tree_failed"
+    def _label_6class(row):
+        """6-class label — backward compat (v4.0)."""
+        y  = "yield_ok" if not row["yield_failed"] else "yield_fail"
+        cs = row["carbonStem_AF_last"]
+        if cs < TREE_FAIL_THRESHOLD:       # noqa: F821 — defined in outer scope
+            t = "tree_failed"
+        elif cs < TREE_STUNT_THRESHOLD:    # noqa: F821
+            t = "tree_stunted"
+        else:
+            t = "tree_ok"
         return f"{y} × {t}"
 
-    population_series = pop_df.apply(_label, axis=1).rename("population")
 
+    def _label_4class(row):
+        """4-class label — v4.1 binary CLF1 routing."""
+        y  = "yield_ok" if not row["yield_failed"] else "yield_fail"
+        cs = row["carbonStem_AF_last"]
+        # tree_degraded fuses failed + stunted (cs < TREE_STUNT_THRESHOLD = 50 kgC)
+        t  = "tree_ok" if cs >= TREE_STUNT_THRESHOLD else "tree_degraded"  # noqa: F821
+        return f"{y} × {t}"
+
+
+    # population_series (6-class, backward compat)
+    population_series = pop_df.apply(_label_6class, axis=1).rename("population")
+
+    # population_binary (4-class, v4.1)
+    population_binary = pop_df.apply(_label_4class, axis=1).rename("population_binary")
+
+    # Merge both back onto df:
     if verbose:
-        log.info("Population distribution:")
+        log.info("Population distribution (6-class):")
         counts = population_series.value_counts()
         pcts   = (counts / len(population_series) * 100).round(1)
         for label in POPULATION_LABELS:
@@ -376,9 +405,18 @@ def filter_population(
             pct = pcts.get(label, 0.0)
             log.info("  %-35s : %4d  (%4.1f%%)", label, n, pct)
 
+        log.info("Population distribution (4-class binary v4.1):")
+        counts4 = population_binary.value_counts()
+        pcts4   = (counts4 / len(population_binary) * 100).round(1)
+        for label in POPULATION_LABELS_BINARY:
+            n   = counts4.get(label, 0)
+            pct = pcts4.get(label, 0.0)
+            log.info("  %-35s : %4d  (%4.1f%%)", label, n, pct)
+
     # ── 4. Merge population label back onto df ────────────────────────────
     df = df.copy()
-    df["population"] = df["SimID"].map(population_series)
+    df["population"]        = df["SimID"].map(population_series)
+    df["population_binary"] = df["SimID"].map(population_binary)
 
     # ── 5. Filter to target population ───────────────────────────────────
     if population is not None:
@@ -604,6 +642,195 @@ def compute_effective_vars(
         log.info("     Total: %d columns added", total)
     return df
 
+
+def build_horizon_dataset(
+    df: pd.DataFrame,
+    horizon: int,
+    target_col: str,
+    feature_cols: list[str],
+    min_final_carbon: float | None = None,
+    carbon_col: str = "carbonStem_AF",
+    min_enrich_horizon: int | None = None,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """
+    Build a SimID-level dataset for a discrete horizon model.
+
+    For each SimID, aggregates climate features over years [1→horizon]
+    and extracts the target value at year=horizon.
+
+    Climate features computed
+    -------------------------
+    Always (all horizons):
+        CLIMATE_SUM_VARS  : {var}_cum, {var}_std
+        CLIMATE_MEAN_VARS : {var}_mean, {var}_std
+
+    Only when horizon > min_enrich_horizon:
+        All vars : {var}_p10, {var}_p90, {var}_trend
+        All vars : {var}_recent_mean  (window [h-RECENT_WINDOW+1, h],
+                   only if horizon > CLIMATE_RECENT_WINDOW)
+
+    Parameters
+    ----------
+    df                 : meta-table (format long, tous SimIDs, toutes années)
+    horizon            : année cible (ex: 5, 10, 20, 30, 40)
+    target_col         : colonne cible (ex: "carbonStem_AF", "yield_AF")
+    feature_cols       : features statiques uniquement — les vars climatiques
+                         brutes (CLIMATE_SUM_VARS / CLIMATE_MEAN_VARS) sont
+                         calculées en interne et ne doivent PAS figurer ici
+    min_final_carbon   : filtre SimID sur carbonStem_AF(t_final) si fourni
+    carbon_col         : colonne pour le filtre min_final_carbon
+    min_enrich_horizon : seuil en dessous duquel p10/p90/trend/recent_mean
+                         sont désactivés. None → lit MIN_ENRICH_HORIZON
+                         depuis config.
+
+    Returns
+    -------
+    X : pd.DataFrame  — une ligne par SimID, index str
+    y : pd.Series     — target à year=horizon, index aligné sur X
+    """
+
+    if min_enrich_horizon is None:
+        min_enrich_horizon = MIN_ENRICH_HORIZON
+
+    use_enriched = (horizon > min_enrich_horizon)
+
+    # ── 0. Filtre optionnel sur carbon final ──────────────────────────────
+    if min_final_carbon is not None:
+        if carbon_col not in df.columns:
+            raise ValueError(
+                f"build_horizon_dataset: '{carbon_col}' not found in df — "
+                f"cannot apply min_final_carbon filter."
+            )
+        last_carbon = (
+            df.sort_values(["SimID", "Harvest_Year_Absolute"])
+            .groupby("SimID")[carbon_col]
+            .last()
+        )
+        valid_sims = last_carbon[last_carbon >= min_final_carbon].index
+        n_before   = df["SimID"].nunique()
+        df         = df[df["SimID"].isin(valid_sims)].copy()
+        n_after    = df["SimID"].nunique()
+        log.debug(
+            "build_horizon_dataset h=%d: min_final_carbon=%.1f → "
+            "%d / %d SimIDs retained (%.1f%%)",
+            horizon, min_final_carbon, n_after, n_before,
+            100.0 * n_after / n_before if n_before > 0 else 0.0,
+        )
+
+    # ── 1. Fenêtre [1, horizon] ───────────────────────────────────────────
+    df_h = df[df["Harvest_Year_Absolute"] <= horizon].copy()
+
+    # ── 2. Target à l'année exacte = horizon ─────────────────────────────
+    df_target = (
+        df[df["Harvest_Year_Absolute"] == horizon]
+        [["SimID", target_col]]
+        .dropna(subset=[target_col])
+        .set_index("SimID")
+    )
+    df_target.index = df_target.index.astype(str)
+
+    # ── 3. Features statiques (première ligne par SimID) ──────────────────
+    all_climate_raw = set(CLIMATE_SUM_VARS + CLIMATE_MEAN_VARS)
+    static_cols = [
+        c for c in feature_cols
+        if c not in all_climate_raw
+        and c != "Harvest_Year_Absolute"
+    ]
+    X_static = df_h.groupby("SimID")[static_cols].first()
+    X_static.index = X_static.index.astype(str)
+
+    # ── 4. Agrégats climatiques vectorisés ───────────────────────────────
+    climate_series: dict[str, pd.Series] = {}
+    all_vars = CLIMATE_SUM_VARS + CLIMATE_MEAN_VARS
+
+    # Pivot matriciel pour stats rapides (n_SimIDs × n_years)
+    # Construit une fois par variable, réutilisé pour toutes les stats
+    for var in all_vars:
+        if var not in df_h.columns:
+            continue
+
+        # ── Pivot (SimID × Harvest_Year_Absolute) ─────────────────────
+        pivot = df_h.pivot_table(
+            index="SimID",
+            columns="Harvest_Year_Absolute",
+            values=var,
+            aggfunc="first",
+        )
+        pivot.index = pivot.index.astype(str)
+        vals = pivot.values.astype(float)  # shape (n_sims, n_years)
+
+        # ── Stats de base — toujours calculées ────────────────────────
+        if var in CLIMATE_SUM_VARS:
+            climate_series[f"{var}_cum"] = pd.Series(
+                np.nansum(vals, axis=1), index=pivot.index
+            )
+        else:
+            climate_series[f"{var}_mean"] = pd.Series(
+                np.nanmean(vals, axis=1), index=pivot.index
+            )
+        climate_series[f"{var}_std"] = pd.Series(
+            np.nanstd(vals, axis=1, ddof=0), index=pivot.index
+        )
+
+        # ── Stats enrichies — seulement si horizon > min_enrich_horizon
+        if use_enriched:
+            # p10 / p90 vectorisés
+            climate_series[f"{var}_p10"] = pd.Series(
+                np.nanpercentile(vals, 10, axis=1), index=pivot.index
+            )
+            climate_series[f"{var}_p90"] = pd.Series(
+                np.nanpercentile(vals, 90, axis=1), index=pivot.index
+            )
+
+            # Trend OLS vectorisé (pente sur index année [0, n-1])
+            n_years   = vals.shape[1]
+            yr_idx    = np.arange(n_years, dtype=float)
+            yr_mean   = yr_idx.mean()
+            yr_var    = ((yr_idx - yr_mean) ** 2).sum()
+            if yr_var > 0:
+                # slope = cov(X, Y) / var(X) pour chaque SimID
+                val_mean = np.nanmean(vals, axis=1, keepdims=True)
+                cov_xy   = np.nanmean(
+                    (yr_idx - yr_mean) * (vals - val_mean), axis=1
+                )
+                slopes = cov_xy / yr_var
+            else:
+                slopes = np.zeros(vals.shape[0])
+            climate_series[f"{var}_trend"] = pd.Series(
+                slopes, index=pivot.index
+            )
+
+            # recent_mean — seulement si h > CLIMATE_RECENT_WINDOW
+            if horizon > CLIMATE_RECENT_WINDOW:
+                recent_start = max(1, horizon - CLIMATE_RECENT_WINDOW + 1)
+                df_recent    = df[
+                    (df["Harvest_Year_Absolute"] >= recent_start) &
+                    (df["Harvest_Year_Absolute"] <= horizon)
+                ]
+                if var in df_recent.columns:
+                    climate_series[f"{var}_recent_mean"] = (
+                        df_recent.groupby("SimID")[var]
+                        .mean()
+                        .rename(index=str)
+                    )
+
+    # ── 5. Assemblage DataFrame climatique ───────────────────────────────
+    X_clim = pd.DataFrame(climate_series)
+    X_clim.index = X_clim.index.astype(str)
+
+    # ── 6. Join statique + climatique, alignement target ─────────────────
+    X = X_static.join(X_clim, how="inner")
+    y = df_target[target_col].reindex(X.index)
+
+    valid = y.notna()
+    X, y  = X[valid], y[valid]
+
+    log.debug(
+        "build_horizon_dataset h=%d target=%s enrich=%s → X: %d × %d | y: %d",
+        horizon, target_col, use_enriched,
+        X.shape[0], X.shape[1], len(y),
+    )
+    return X, y
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STEP 1e — CARBON DELTAS (diagnostic only)

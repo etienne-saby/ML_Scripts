@@ -515,9 +515,17 @@ LOG_TARGETS: list[str] = [
     "carbonBranches_TF",
 ]
 
-# Sequential training order: tree carbon (stage 1) → crop yield (stage 2).
-# Stage 2 models receive stage 1 predictions as additional input features.
-SEQUENTIAL_TARGETS_STAGE1: list[str] = ["carbonStem_AF", "carbonStem_TF"]
+CARBON_HORIZONS: list[int] = [5, 10, 20, 30, 40]
+MIN_CARBON_HORIZON: float = 50.0      # kgC/tree — training threshold
+NO_INJECT_HORIZON: int = 10
+MIN_ENRICH_HORIZON: int = 10
+
+SEQUENTIAL_TARGETS_STAGE1: list[str] = [
+    f"carbonStem_AF_h{h}" for h in CARBON_HORIZONS
+] + [
+    f"carbonStem_TF_h{h}" for h in CARBON_HORIZONS
+]
+
 SEQUENTIAL_TARGETS_STAGE2: list[str] = ["yield_AF", "yield_TA"]
 
 # ============================================================================
@@ -527,8 +535,8 @@ SEQUENTIAL_TARGETS_STAGE2: list[str] = ["yield_AF", "yield_TA"]
 # CLF1 — Tree failure
 # A simulation is flagged tree_failed when carbonStem_AF at the last
 # crop cycle is below this threshold.
-TREE_FAIL_THRESHOLD: float = 1.0    # kgC/tree
-
+TREE_FAIL_THRESHOLD: float  = 1.0     # kgC/tree — seuil failed/stunted
+TREE_STUNT_THRESHOLD: float = 50.0    # kgC/tree — seuil stunted/ok
 # CLF2 — Yield failure
 # A simulation is flagged yield_failed when the fraction of crop cycles
 # (rows in the meta-table for that SimID) with yield_AF below

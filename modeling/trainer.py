@@ -22,9 +22,18 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import lightgbm as lgb
+
 from sklearn.base import clone
 from sklearn.model_selection import GroupKFold
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.metrics import (
+    mean_squared_error,
+    mean_absolute_error,
+    r2_score,
+    accuracy_score,
+    f1_score,
+    roc_auc_score,
+)
 import optuna
 from tqdm.auto import tqdm
 
@@ -35,6 +44,7 @@ from config import (
     OPTUNA_TIMEOUT,
     OPTUNA_N_JOBS,
     OPTUNA_SEARCH_SPACE,
+    CARBON_HORIZONS
 )
 
 log = logging.getLogger(__name__)
@@ -114,6 +124,7 @@ def cross_validate(
 
         # Inject stage-1 predictions if provided (sequential pipeline)
         if extra_train_features is not None:
+            assert len(extra_train_features) == len(X), "extra_train_features is not aligned with X (lengths mismatch)."
             X_fold_train = pd.concat(
                 [X_fold_train.reset_index(drop=True),
                 extra_train_features.iloc[train_idx].reset_index(drop=True)],
@@ -155,6 +166,8 @@ def cross_validate(
         "std_r2_val":     float(df_scores["r2_val"].std()),
         "mean_rmse_val":  float(df_scores["rmse_val"].mean()),
         "mean_mae_val":   float(df_scores["mae_val"].mean()),
+        "std_rmse_val":   float(df_scores["rmse_val"].std()),
+        "std_mae_val":    float(df_scores["mae_val"].std()),
     }
 
     if verbose:
@@ -199,13 +212,13 @@ def train_final_model(
     -------
     model : fitted estimator
     metrics : dict
-        Keys: ``r2_train``, ``rmse_train``, ``mae_train``
-        and optionally ``r2_test``, ``rmse_test``, ``mae_test``.
+        Keys: ``train_r2``, ``train_rmse``, ``train_mae``
+        and optionally ``test_r2``, ``test_rmse``, ``test_mae``.
 
     Examples
     --------
     >>> model, metrics = train_final_model(model, X_train, y_train, X_test, y_test)
-    >>> print(f"Test R²: {metrics['r2_test']:.3f}")
+    >>> print(f"Test R²: {metrics['test_r2']:.3f}")
     """
     if verbose:
         log.info("🚀 Training final model on %d examples...", len(X_train))
@@ -216,69 +229,88 @@ def train_final_model(
 
     y_train_pred = model.predict(X_train)
     metrics: dict[str, float] = {
-        "r2_train":   float(r2_score(y_train, y_train_pred)),
-        "rmse_train": float(np.sqrt(mean_squared_error(y_train, y_train_pred))),
-        "mae_train":  float(mean_absolute_error(y_train, y_train_pred)),
+        "train_r2":   float(r2_score(y_train, y_train_pred)),
+        "train_rmse": float(np.sqrt(mean_squared_error(y_train, y_train_pred))),
+        "train_mae":  float(mean_absolute_error(y_train, y_train_pred)),
     }
 
     if X_test is not None and y_test is not None:
         y_test_pred = model.predict(X_test)
         metrics.update({
-            "r2_test":   float(r2_score(y_test, y_test_pred)),
-            "rmse_test": float(np.sqrt(mean_squared_error(y_test, y_test_pred))),
-            "mae_test":  float(mean_absolute_error(y_test, y_test_pred)),
+            "test_r2":   float(r2_score(y_test, y_test_pred)),
+            "test_rmse": float(np.sqrt(mean_squared_error(y_test, y_test_pred))),
+            "test_mae":  float(mean_absolute_error(y_test, y_test_pred)),
         })
 
     if verbose:
         log.info("\n%s", "=" * 60)
         log.info("FINAL MODEL METRICS")
         log.info("%s", "=" * 60)
-        log.info("R² train  : %.3f", metrics["r2_train"])
-        log.info("RMSE train: %.3f", metrics["rmse_train"])
-        if "r2_test" in metrics:
-            log.info("R² test   : %.3f", metrics["r2_test"])
-            log.info("RMSE test : %.3f", metrics["rmse_test"])
-            log.info("MAE test  : %.3f", metrics["mae_test"])
+        log.info("R² train  : %.3f", metrics["train_r2"])
+        log.info("RMSE train: %.3f", metrics["train_rmse"])
+        if "test_r2" in metrics:
+            log.info("R² test   : %.3f", metrics["test_r2"])
+            log.info("RMSE test : %.3f", metrics["test_rmse"])
+            log.info("MAE test  : %.3f", metrics["test_mae"])
         log.info("%s\n", "=" * 60)
 
     return model, metrics
 
 def train_classifier(
-    model: Any,
+    model: lgb.LGBMClassifier,
     X_train: pd.DataFrame,
     y_train: pd.Series,
     X_test: pd.DataFrame | None = None,
     y_test: pd.Series | None = None,
     verbose: bool = True,
-) -> tuple[Any, dict[str, float]]:
+) -> tuple[lgb.LGBMClassifier, dict[str, float]]:
     """
-    Train a binary classifier and evaluate with classification metrics.
+    Train a LightGBM classifier and compute metrics.
 
-    Used for tree_fail and yield_fail cascade classifiers.
+    Handles both binary and multiclass classification automatically.
 
     Parameters
     ----------
-    model : LGBMClassifier
-    X_train, y_train : training data
-    X_test, y_test : optional test data
-    verbose : bool
+    model : lgb.LGBMClassifier
+        Unfitted classifier instance.
+    X_train, y_train : pd.DataFrame, pd.Series
+        Training data.
+    X_test, y_test : pd.DataFrame, pd.Series, optional
+        Test data.
+    verbose : bool, default True
 
     Returns
     -------
-    model : fitted classifier
+    model_fitted : lgb.LGBMClassifier
+        Fitted classifier.
     metrics : dict
-        Keys: accuracy_train, f1_train, roc_auc_train
-        and optionally _test variants.
+        Train and test metrics (accuracy, f1, roc_auc for binary;
+        accuracy, f1_macro for multiclass).
     """
-    from sklearn.metrics import (
-        accuracy_score, f1_score, roc_auc_score,
-    )
+    if verbose:
+        log.info("Training classifier: %s", model.__class__.__name__)
+        log.info("  Train: %d samples | Test: %d samples",
+                 len(y_train), len(y_test) if y_test is not None else 0)
 
-    cat_feat   = getattr(model, "_categorical_feature", None)
+    # Detect number of classes
+    n_classes = y_train.nunique()
+    is_binary = (n_classes == 2)
+
+    if verbose:
+        log.info("  Detected %d classes → %s classification",
+                 n_classes, "binary" if is_binary else "multiclass")
+
+    # Fit
+    cat_feat = getattr(model, "_categorical_feature", None)
     fit_kwargs = {"categorical_feature": cat_feat} if cat_feat is not None else {}
     model.fit(X_train, y_train, **fit_kwargs)
 
-    def _clf_metrics(y_true, y_pred_proba, prefix):
+    if verbose:
+        log.info("  ✓ Training complete")
+
+    # ── Metrics computation ─────────────────────────────────────────────────
+    def _clf_metrics_binary(y_true, y_pred_proba, prefix):
+        """Binary classification metrics."""
         y_pred = (y_pred_proba >= 0.5).astype(int)
         return {
             f"{prefix}accuracy": float(accuracy_score(y_true, y_pred)),
@@ -286,19 +318,37 @@ def train_classifier(
             f"{prefix}roc_auc":  float(roc_auc_score(y_true, y_pred_proba)),
         }
 
-    metrics = _clf_metrics(
-        y_train, model.predict_proba(X_train)[:, 1], "train_"
-    )
+    def _clf_metrics_multiclass(y_true, y_pred, prefix):
+        """Multiclass classification metrics."""
+        return {
+            f"{prefix}accuracy": float(accuracy_score(y_true, y_pred)),
+            f"{prefix}f1_macro": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        }
 
-    if X_test is not None and y_test is not None:
-        metrics.update(_clf_metrics(
-            y_test, model.predict_proba(X_test)[:, 1], "test_"
-        ))
+    # ── Compute metrics ─────────────────────────────────────────────────────
+    if is_binary:
+        # Binary: use predict_proba[:, 1] for positive class
+        metrics = _clf_metrics_binary(
+            y_train, model.predict_proba(X_train)[:, 1], "train_"
+        )
+        if X_test is not None and y_test is not None:
+            metrics.update(_clf_metrics_binary(
+                y_test, model.predict_proba(X_test)[:, 1], "test_"
+            ))
+    else:
+        # Multiclass: use predict() directly
+        metrics = _clf_metrics_multiclass(
+            y_train, model.predict(X_train), "train_"
+        )
+        if X_test is not None and y_test is not None:
+            metrics.update(_clf_metrics_multiclass(
+                y_test, model.predict(X_test), "test_"
+            ))
 
     if verbose:
-        log.info("CLASSIFIER METRICS")
+        log.info("  Metrics:")
         for k, v in metrics.items():
-            log.info("  %-25s : %.3f", k, v)
+            log.info("    %-20s : %.4f", k, v)
 
     return model, metrics
 
