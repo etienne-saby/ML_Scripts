@@ -108,6 +108,7 @@ class CampaignPaths:
     (CART plots are written directly into diagnostics_dir).
     """
     campaign_name:   str
+    sim_camp_dir:    Path
     campaign_dir:    Path
     data_dir:        Path
     metamodels_dir:  Path
@@ -280,6 +281,7 @@ def get_campaign_paths(
     diagnostics_dir directly.
     """
     base = get_hisafe_paths(root_dir)
+    sim_dir        = base.simulations_dir / campaign_name
     campaign_dir   = base.models_dir / campaign_name
     data_dir       = campaign_dir / "Data"
     metamodels_dir = campaign_dir / "MetaModels"
@@ -287,6 +289,7 @@ def get_campaign_paths(
 
     cp = CampaignPaths(
         campaign_name  = campaign_name,
+        sim_camp_dir   = sim_dir,
         campaign_dir   = campaign_dir,
         data_dir       = data_dir,
         metamodels_dir = metamodels_dir,

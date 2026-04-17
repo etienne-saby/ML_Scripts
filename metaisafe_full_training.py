@@ -267,10 +267,10 @@ EXAMPLE_PARAMS_DEFAULT: dict = {
 # Quality thresholds — used in STEP 7 summary table
 QUALITY_THRESHOLDS: dict = {
     "clf1_f1_macro":  0.70,
-    "clf1_roc_auc":   0.85,
-    "clf2_accuracy":  0.80,
+    "clf1_roc_auc":   0.80,
+    "clf2_accuracy":  0.85,
     "carbon_r2":      0.60,
-    "carbon_rho":     0.85,
+    "carbon_rho":     0.80,
     "yield_af_r2":    0.55,
     "yield_ta_r2":    0.55,
 }
@@ -361,6 +361,19 @@ def _step1_load_and_prepare(
         log.warning("Columns with >5%% NA after cleaning:\n%s", na_high.to_string())
     else:
         log.info("No key column with >5%% NA after cleaning.")
+
+    log.info("Dropping NAs for 'yield_AF/_TA'")
+    cols_to_check = ['yield_AF', 'yield_TA']
+    mask_na = df[cols_to_check].isna().any(axis=1)
+
+    if mask_na.any():
+        nan_count = mask_na.sum()
+        nan_simIDs = df.loc[mask_na, 'SimID'].unique().tolist()
+        ids_string = ", ".join(map(str, nan_simIDs))
+        df = df[~mask_na]
+        log.info("Dropped %d NAs rows for SimIDs: %s.", nan_count, ids_string)
+    else:
+        log.info("No NAs found for 'yield_AF'.")
 
     # 1e. Effective (analytical) variables
     df = compute_effective_vars(df, verbose=True)
@@ -677,6 +690,8 @@ def _step5a_classifiers(
     df_nominal: pd.DataFrame,
     campaign: Any,
     params_clf1: dict,
+    clf1_feats: list[str] = CLF1_FEATURES,
+    clf2_feats: list[str] = CLF2_FEATURES,
 ) -> tuple[Any, Any, dict, dict, dict, pd.DataFrame, pd.DataFrame]:
     """
     Train CLF1 (binary tree status) and CLF2 (binary yield failure).
@@ -725,8 +740,8 @@ def _step5a_classifiers(
         df, params=params_clf1, multiclass=False, verbose=True,
     )
 
-    X_clf1_train = build_classifier_features(df_clf_train, CLF1_FEATURES)
-    X_clf1_test  = build_classifier_features(df_clf_test,  CLF1_FEATURES)
+    X_clf1_train = build_classifier_features(df_clf_train, clf1_feats)
+    X_clf1_test  = build_classifier_features(df_clf_test,  clf1_feats)
     y_clf1_train = build_tree_degraded_labels(df_clf_train)
     y_clf1_test  = build_tree_degraded_labels(df_clf_test)
 
@@ -778,8 +793,8 @@ def _step5a_classifiers(
     log.info("\n--- CLF2: Yield Failure (binary) ---")
     clf2_model, _, _ = build_yield_fail_classifier(df, verbose=True)
 
-    X_clf2_train = build_classifier_features(df_clf_train, CLF2_FEATURES)
-    X_clf2_test  = build_classifier_features(df_clf_test,  CLF2_FEATURES)
+    X_clf2_train = build_classifier_features(df_clf_train, clf2_feats)
+    X_clf2_test  = build_classifier_features(df_clf_test,  clf2_feats)
     y_clf2_train = build_yield_fail_labels(df_clf_train)
     y_clf2_test  = build_yield_fail_labels(df_clf_test)
 
@@ -848,7 +863,7 @@ def _step5a_classifiers(
 
     # ── Routing sanity check on nominal population ─────────────────────────
     log.info("\n--- Routing sanity check (nominal population) ---")
-    all_clf_feats = CLF1_FEATURES + [c for c in CLF2_FEATURES if c not in CLF1_FEATURES]
+    all_clf_feats = clf1_feats + [c for c in clf2_feats if c not in clf1_feats]
     X_nominal_clf = build_classifier_features(df_nominal, feature_cols=all_clf_feats)
     routing_check = predict_routing(X_nominal_clf, clf1_fitted, clf2_fitted)
 

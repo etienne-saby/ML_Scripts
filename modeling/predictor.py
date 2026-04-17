@@ -58,6 +58,7 @@ from config import (
     CampaignPaths,
     RANDOM_STATE,
     CARBON_HORIZONS,
+    MIN_ENRICH_HORIZON
 )
 from column_taxonomy import (
     ACTIVE_FEATURES_B2,
@@ -603,11 +604,20 @@ def predict_cascade(
         horizons = CARBON_HORIZONS
 
     # ── 1. Routing ────────────────────────────────────────────────────────
-    X_clf = pd.DataFrame([{
-        col: params.get(col)
-        for col in CLF1_FEATURES + CLF2_FEATURES
-        if col in params
-    }])
+    # Build routing features
+    X_clf_dict = {}
+    for col in CLF1_FEATURES + CLF2_FEATURES:
+        if col not in params:
+            continue
+        val = params[col]
+        # Si c'est un array, prendre la première valeur (année 1)
+        if hasattr(val, '__len__') and not isinstance(val, str):
+            X_clf_dict[col] = float(val[0])
+        else:
+            X_clf_dict[col] = val
+
+    X_clf = pd.DataFrame([X_clf_dict])
+    
     for col in CATEGORICAL_FEATURES_B2:
         if col in X_clf.columns:
             X_clf[col] = X_clf[col].astype("category")

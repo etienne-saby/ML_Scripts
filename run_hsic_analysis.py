@@ -14,7 +14,7 @@ Step 5 : Visualisation
 Usage
 -----
 Run interactively cell-by-cell in a Jupyter notebook, or as a script:
-    python run_sensitivity_analysis.py
+    python run_hsic_analysis.py
 
 Author  : Étienne SABY
 Updated : 2026-05
